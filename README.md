@@ -1,5 +1,7 @@
 # Komari
 
+> This fork maintains Server/frontend 1.4.3 with Agent 1.2.60. See [FORK.md](FORK.md) for independent builds, releases and VPS upgrades. The upstream introduction is retained below.
+
 ![Badge](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fkomari-monitor%2Fkomari&label=&icon=github&color=%23a370f7&message=&style=flat&tz=UTC)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/komari-monitor/komari)
 

@@ -1,5 +1,7 @@
 # Komari
 
+> 本 fork 基于 Server/前端 `1.4.3`、Agent `1.2.60`。自主构建、镜像发布和 VPS 升级说明见 [FORK.md](FORK.md)。以下保留上游项目介绍。
+
 ![Badge](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fkomari-monitor%2Fkomari&label=&icon=github&color=%23a370f7&message=&style=flat&tz=UTC)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/komari-monitor/komari)
 

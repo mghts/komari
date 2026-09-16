@@ -1,0 +1,12 @@
+name: CI
+on:
+  push:
+    branches: [komari-1.4.3, build/independent-release]
+  pull_request:
+    branches: [komari-1.4.3]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml

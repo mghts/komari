@@ -1,107 +1,62 @@
-name: Build Binaries on PR
-
+name: Build and test Linux packages
 on:
-  pull_request:
-    branches:
-      - main
-  workflow_dispatch:
-
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: 0.0.0-dev
+permissions:
+  contents: read
 jobs:
-  build-frontend:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Build frontend artifact
-        uses: ./.github/actions/build-frontend
-        with:
-          artifact-name: komari-frontend
-
-  build-binaries:
-    needs: build-frontend
-    runs-on: ubuntu-latest
-
+  build:
     strategy:
+      fail-fast: false
       matrix:
-        goos: [windows, linux]
-        goarch: [amd64, arm64, 386, riscv64]
         include:
-          # Windows
-          - goos: windows
-            goarch: amd64
-            zig_target_triple: x86_64-windows-gnu
-            binary_extension: .exe
-          - goos: windows
-            goarch: arm64
-            zig_target_triple: aarch64-windows-gnu
-            binary_extension: .exe
-          - goos: windows
-            goarch: 386
-            zig_target_triple: x86-windows-gnu
-            binary_extension: .exe
-
-          # Linux
-          - goos: linux
-            goarch: amd64
-            zig_target_triple: x86_64-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: arm64
-            zig_target_triple: aarch64-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: 386
-            zig_target_triple: x86-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: riscv64
-            zig_target_triple: riscv64-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: loong64
-            zig_target_triple: loongarch64-linux-musl
-            binary_extension: ""
-
-        exclude:
-          - goos: windows
-            goarch: riscv64
-
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Restore frontend artifact
-        uses: ./.github/actions/restore-frontend
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Run Go tests
+        uses: docker/build-push-action@v6
         with:
-          go-version: "1.23"
-
-      - name: Install Zig cross-compiler toolchain
-        uses: ./.github/actions/setup-zig
-
-      - name: Build binary
+          context: .
+          target: test
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: local/komari:${{ inputs.version }}-${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ inputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          provenance: false
+      - name: Smoke test runtime
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 1
-          CC: zig cc -target ${{ matrix.zig_target_triple }}
-          GIN_MODE: release
+          IMAGE: local/komari:${{ inputs.version }}-${{ matrix.arch }}
+          VERSION: ${{ inputs.version }}
+        run: python3 scripts/smoke.py "$IMAGE" "$VERSION"
+      - name: Export tested package
+        env:
+          IMAGE: local/komari:${{ inputs.version }}-${{ matrix.arch }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          BINARY_NAME=komari-${{ matrix.goos }}-${{ matrix.goarch }}
-          # Append the appropriate executable extension based on the OS
-          if [ "${{ matrix.binary_extension }}" != "" ]; then
-            BINARY_NAME=${BINARY_NAME}${{ matrix.binary_extension }}
-          fi
-          VERSION="${{ github.sha }}"
-          VERSION_HASH="${{ github.sha }}"
-          go build -trimpath -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}" -o $BINARY_NAME
-
-      - name: Upload binary as artifact
-        uses: actions/upload-artifact@v4
+          mkdir -p dist
+          container="$(docker create "$IMAGE")"
+          docker cp "$container:/app/komari" "dist/komari-linux-$ARCH"
+          docker save "$IMAGE" -o "dist/image-$ARCH.tar"
+      - uses: actions/upload-artifact@v4
         with:
-          name: komari-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: komari-${{ matrix.goos }}-${{ matrix.goarch }}*
+          name: package-${{ matrix.arch }}
+          path: dist/
+          retention-days: 7
