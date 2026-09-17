@@ -1,6 +1,7 @@
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS frontend
 RUN apk add --no-cache git
 COPY build/frontend.json /tmp/frontend.json
+COPY build/agent.json /tmp/agent.json
 WORKDIR /frontend
 RUN REPO="$(node -p 'require("/tmp/frontend.json").repository')" && \
     REF="$(node -p 'require("/tmp/frontend.json").commit')" && \
@@ -9,6 +10,7 @@ RUN REPO="$(node -p 'require("/tmp/frontend.json").repository')" && \
     git fetch --depth=1 origin "$REF" && git checkout --detach FETCH_HEAD && \
     test "$(git rev-parse HEAD)" = "$REF" && \
     npm ci --no-audit --no-fund && \
+    npm run check:fork -- /tmp/agent.json && \
     SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" npm run build
 
 FROM golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS source

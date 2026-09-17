@@ -26,6 +26,10 @@ Komari is a lightweight, self-hosted server monitoring solution. It provides a s
 
 ## Quick Start
 
+For this fork, use [FORK.md](FORK.md) and [deploy/compose.yaml](deploy/compose.yaml) with an explicit `ghcr.io/mghts/komari` version. The upstream app stores and documentation below install the upstream project, not this fork.
+
+### Upstream resources (reference only)
+
 | Platform                                                                                                                                                                                                  | Description                                                                                                                                                              |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | <a href="https://app.rainyun.com/apps/rca/store/6780/NzYxNzAz_"><img src="https://rainyun-apps.cn-nb1.rains3.com/materials/deploy-on-rainyun-cn.svg" alt="Rainyun" width="180"></a>                       | Deploy websites, databases, and hundreds of popular apps in seconds with flexible hourly billing.                                                                        |

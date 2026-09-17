@@ -21,6 +21,11 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - name: Check fork sources and installer
+        run: |
+          python3 scripts/check_fork.py
+          bash -n install-komari.sh
+          python3 scripts/test_server_installer.py
       - uses: docker/setup-buildx-action@v3
       - name: Run Go tests
         uses: docker/build-push-action@v6

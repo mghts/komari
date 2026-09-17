@@ -34,8 +34,8 @@ DATA_BACKUP_DIR="$DATA_DIR/data/backup"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
 REPO="mghts/komari"
-# 发布通道: stable（稳定版）或 snapshot（快照版）
-CHANNEL="stable"
+# fork 只安装用户明确选择的 Release（包括 RC），不使用上游 Snapshot/latest。
+INSTALL_VERSION=""
 # TUI 工具: whiptail / dialog / 空（回退纯文本）
 TUI_TOOL=""
 
@@ -165,30 +165,20 @@ show_banner() {
     clear
     echo "=============================================================="
     echo "            Komari Monitoring System Installer"
-    echo "       https://github.com/komari-monitor/komari"
+    echo "       https://github.com/mghts/komari"
     echo "=============================================================="
     echo
 }
 
-# 选择发布通道，结果写入全局变量 CHANNEL
-select_channel() {
-    local choice
-    choice=$(ui_menu "选择发布通道" "请选择要使用的发布通道：" \
-        "stable" "稳定版 (推荐)" \
-        "snapshot" "快照版 (最新功能)")
-
-    case "$choice" in
-        snapshot|2)
-            CHANNEL="snapshot"
-            ;;
-        stable|1|"")
-            CHANNEL="stable"
-            ;;
-        *)
-            CHANNEL="stable"
-            ;;
-    esac
-    log_info "已选择通道: $CHANNEL"
+# 使用明确版本，避免尚无正式 Release 时 latest 指向不存在的资源。
+select_version() {
+    local version
+    version=$(ui_input "选择 fork 版本" "输入 mghts/komari Release 版本（如 1.4.4-rc.2）：" "$INSTALL_VERSION") || return 1
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+        ui_msgbox "错误" "必须输入明确的 Release 版本，不能使用 latest 或 Snapshot。"
+        return 1
+    fi
+    INSTALL_VERSION="$version"
 }
 
 # ==========================================================
@@ -214,6 +204,7 @@ check_systemd() {
 
 # Detect system architecture
 detect_arch() {
+    [[ "$(uname -s)" = Linux ]] || { log_error "仅支持 Linux amd64/arm64" >&2; return 1; }
     local arch=$(uname -m)
     case $arch in
         x86_64)
@@ -221,15 +212,6 @@ detect_arch() {
             ;;
         aarch64)
             echo "arm64"
-            ;;
-        i386|i686)
-            echo "386"
-            ;;
-        riscv64)
-            echo "riscv64"
-            ;;
-        loongarch64|loong64)
-            echo "loong64"
             ;;
         *)
             log_error "不支持的架构: $arch"
@@ -269,27 +251,22 @@ install_dependencies() {
     fi
 }
 
-# Get download URL based on channel
-get_download_url() {
-    local arch=$1
-    local file_name="komari-linux-${arch}"
-
-    if [ "$CHANNEL" = "snapshot" ]; then
-        # 获取最新的 snapshot 预发布版本
-        log_info "获取最新 snapshot 版本..." >&2
-        local latest_snapshot=$(curl -s "https://api.github.com/repos/${REPO}/releases" | grep '"tag_name"' | grep 'Snapshot-' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
-
-        if [ -z "$latest_snapshot" ]; then
-            log_error "未找到 snapshot 版本" >&2
-            return 1
-        fi
-
-        log_info "最新 snapshot 版本: $latest_snapshot" >&2
-        echo "https://github.com/${REPO}/releases/download/${latest_snapshot}/${file_name}"
-    else
-        # 稳定版：使用 latest
-        echo "https://github.com/${REPO}/releases/latest/download/${file_name}"
-    fi
+# 下载到独立保留目录，校验成功前不改动现有程序或服务。
+download_verified_binary() {
+    local arch="$1" stage filename base expected actual
+    filename="komari-linux-${arch}"
+    base="https://github.com/${REPO}/releases/download/${INSTALL_VERSION}"
+    command -v sha256sum >/dev/null 2>&1 || { log_error "需要 sha256sum" >&2; return 1; }
+    stage=$(mktemp -d "${TMPDIR:-/tmp}/komari-download.XXXXXXXX") || return 1
+    log_info "下载文件保留在 $stage" >&2
+    curl -fsSL "$base/$filename" -o "$stage/$filename" || return 1
+    curl -fsSL "$base/SHA256SUMS" -o "$stage/SHA256SUMS" || return 1
+    expected=$(awk -v name="$filename" '$2 == name {print $1}' "$stage/SHA256SUMS")
+    [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || { log_error "SHA256SUMS 缺少唯一有效校验值" >&2; return 1; }
+    actual=$(sha256sum "$stage/$filename") || return 1
+    [[ "${actual%% *}" = "$expected" ]] || { log_error "SHA256 校验失败" >&2; return 1; }
+    chmod +x "$stage/$filename" || return 1
+    echo "$stage/$filename"
 }
 
 # ==========================================================
@@ -305,8 +282,7 @@ install_binary() {
         return
     fi
 
-    # 选择发布通道
-    select_channel
+    select_version || return 1
 
     # 监听端口输入，校验范围 1-65535
     while true; do
@@ -330,7 +306,8 @@ install_binary() {
 
     install_dependencies
 
-    local arch=$(detect_arch)
+    local arch
+    arch=$(detect_arch) || return 1
     log_info "检测到架构: $arch"
 
     log_step "创建安装目录: $INSTALL_DIR"
@@ -339,21 +316,10 @@ install_binary() {
     log_step "创建数据目录: $DATA_DIR"
     mkdir -p "$DATA_DIR"
 
-    local download_url=$(get_download_url "$arch")
-    if [ $? -ne 0 ]; then
-        ui_msgbox "错误" "获取下载链接失败，请检查网络连接或稍后重试。"
-        return 1
-    fi
+    local staged_binary
+    staged_binary=$(download_verified_binary "$arch") || return 1
+    cp "$staged_binary" "$BINARY_PATH" || return 1
 
-    log_step "下载 Komari 二进制文件..."
-    log_info "URL: $download_url"
-
-    if ! curl -L -o "$BINARY_PATH" "$download_url"; then
-        ui_msgbox "错误" "下载失败，请检查网络连接。"
-        return 1
-    fi
-
-    chmod +x "$BINARY_PATH"
     log_success "Komari 二进制文件安装完成: $BINARY_PATH"
 
     if ! check_systemd; then
@@ -455,52 +421,28 @@ upgrade_komari() {
         return 1
     fi
 
-    # 选择发布通道
-    select_channel
+    select_version || return 1
 
-    log_step "停止 Komari 服务..."
-    systemctl stop ${SERVICE_NAME}.service
+    install_dependencies
+    local arch staged_binary backup_path
+    arch=$(detect_arch) || return 1
+    staged_binary=$(download_verified_binary "$arch") || return 1
 
-    log_step "清理旧的二进制备份..."
-    rm -f -- "${BINARY_PATH}.backup."*
-
-    local backup_path="${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
-    log_step "备份当前二进制文件..."
-    if ! cp "$BINARY_PATH" "$backup_path"; then
-        log_error "备份当前二进制文件失败，正在启动服务"
-        systemctl start ${SERVICE_NAME}.service
-        ui_msgbox "错误" "备份当前二进制文件失败，升级已取消。"
-        return 1
-    fi
-
-    local arch=$(detect_arch)
-    local download_url=$(get_download_url "$arch")
-    if [ $? -ne 0 ]; then
-        log_error "获取下载链接失败，正在从备份恢复"
-        mv "$backup_path" "$BINARY_PATH"
-        systemctl start ${SERVICE_NAME}.service
-        ui_msgbox "错误" "获取下载链接失败，已从备份恢复。"
-        return 1
-    fi
-
-    log_step "下载最新版本..."
-    if ! curl -L -o "$BINARY_PATH" "$download_url"; then
-        log_error "下载失败，正在从备份恢复"
-        mv "$backup_path" "$BINARY_PATH"
-        systemctl start ${SERVICE_NAME}.service
-        ui_msgbox "错误" "下载失败，已从备份恢复。"
-        return 1
-    fi
-
-    chmod +x "$BINARY_PATH"
-
-    log_step "重启 Komari 服务..."
-    systemctl start ${SERVICE_NAME}.service
-
-    if systemctl is-active --quiet ${SERVICE_NAME}.service; then
-        ui_msgbox "升级完成" "Komari 升级成功 (通道: $CHANNEL)。"
+    # 下载或校验失败不会停止旧服务；保留每次升级的备份。
+    backup_path=$(mktemp "${BINARY_PATH}.backup.XXXXXXXX") || return 1
+    cp -p "$BINARY_PATH" "$backup_path" || return 1
+    systemctl stop "${SERVICE_NAME}.service" || return 1
+    if cp "$staged_binary" "$BINARY_PATH" &&
+       systemctl start "${SERVICE_NAME}.service" &&
+       systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+        ui_msgbox "升级完成" "Komari 升级成功 (版本: $INSTALL_VERSION)。备份: $backup_path"
     else
-        ui_msgbox "错误" "服务在升级后未能启动，请检查日志。"
+        log_error "升级失败，尝试恢复旧二进制文件"
+        systemctl stop "${SERVICE_NAME}.service" || return 1
+        cp -p "$backup_path" "$BINARY_PATH" || return 1
+        systemctl start "${SERVICE_NAME}.service" || return 1
+        ui_msgbox "错误" "升级失败，已恢复旧二进制文件。请检查日志和数据兼容性。备份: $backup_path"
+        return 1
     fi
 }
 
@@ -656,7 +598,9 @@ main_menu() {
     done
 }
 
-# Main execution
-check_root
-detect_tui
-main_menu
+# Main execution (sourcing defines functions for isolated installer tests).
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]}" = "$0" ]]; then
+    check_root
+    detect_tui
+    main_menu
+fi

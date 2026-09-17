@@ -68,3 +68,11 @@ Agent 发布说明、安装器和 Compose 见 [mghts/komari-agent](https://githu
 ## 首版范围
 
 此阶段不修改监控业务、数据库结构或页面设计，只建立独立构建、发布和升级流程。前端的安装来源和版本提示已切换到本 fork。实际生产迁移需使用你自己的数据目录、域名、token 和现有服务设置。
+
+## 安装与资源来源核对
+
+- Server/Agent 镜像和二进制来自 `mghts` 的明确版本；RC 不使用 `latest` 或旧 Snapshot 通道。
+- `install-komari.sh` 的 systemd 安装要求输入明确版本，仅支持 Linux amd64/arm64；下载二进制和 `SHA256SUMS` 并验证后才停止旧服务，保留旧二进制。二进制回退不撤销数据库迁移，升级前仍需一致性数据备份。Docker 部署继续按本文步骤操作。
+- 导航、帮助、关于页面和默认主题信息指向 fork。Go module/import、许可证作者、上游基线和历史工作流保留原信息。
+- 主题市场 `komari-monitor/theme-market` 与插件市场 `komari-monitor/plugin-market` 是独立的公共目录，继续使用；它们不是 Server/Agent 的安装或自动更新源。第三方主题、插件及已有数据库中的自定义来源不会被此修复覆盖。
+- 前端 CI 的 `npm run check:fork` 检查运行代码中的上游地址和安装命令。Server 构建额外核对前端 `AGENT_VERSION` 与 `build/agent.json` 一致；`python3 scripts/check_fork.py` 检查 Server 活跃入口。
