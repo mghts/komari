@@ -299,9 +299,13 @@ func (m *Module) spawnChild(vm *goja.Runtime, command string, arguments []string
 		return vm.ToValue(false)
 	})
 
-	m.pipeChildOutput(vm, stdoutReader, stdout, options.encoding)
-	m.pipeChildOutput(vm, stderrReader, stderr, options.encoding)
+	stdoutDone := m.pipeChildOutput(vm, stdoutReader, stdout, options.encoding)
+	stderrDone := m.pipeChildOutput(vm, stderrReader, stderr, options.encoding)
 	go func() {
+		// Wait closes StdoutPipe/StderrPipe. Drain both readers first so it
+		// cannot truncate output or emit close before the queued stream ends.
+		<-stdoutDone
+		<-stderrDone
 		err := cmd.Wait()
 		cancel()
 		m.runtime.RemoveResource(resourceID)
@@ -414,13 +418,15 @@ func childCallback(call goja.FunctionCall) goja.Callable {
 	return nil
 }
 
-func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goja.Object, encoding string) {
+func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goja.Object, encoding string) <-chan struct{} {
 	push, _ := goja.AssertFunction(stream.Get("push"))
 	setEncoding, _ := goja.AssertFunction(stream.Get("setEncoding"))
 	if encoding != "" && setEncoding != nil {
 		_, _ = setEncoding(stream, vm.ToValue(encoding))
 	}
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		data := make([]byte, 32*1024)
 		for {
 			count, err := reader.Read(data)
@@ -449,6 +455,7 @@ func (m *Module) pipeChildOutput(vm *goja.Runtime, reader io.Reader, stream *goj
 			}
 		}
 	}()
+	return done
 }
 
 func (m *Module) execChild(vm *goja.Runtime, command string, arguments []string, options childCommandOptions, callback goja.Callable) *goja.Object {

@@ -99,6 +99,45 @@ func TestChildProcessStdioAreStreams(t *testing.T) {
 		t.Fatalf("child_process stdio streams failed: %v", err)
 	}
 }
+func TestChildProcessCloseFollowsOutput(t *testing.T) {
+	jsRuntime, err := New(`
+		async function verify(command, environment) {
+			for (let attempt = 0; attempt < 10; attempt++) {
+				await new Promise((resolve, reject) => {
+					const child = require("child_process").spawn(command,
+						["-test.run=^TestNodeChildProcessHelper$"], { env: environment });
+					let output = "";
+					let stdoutEnded = false;
+					let stderrEnded = false;
+					child.stdout.on("data", chunk => output += String(chunk));
+					child.stderr.on("data", () => {});
+					child.stdout.on("end", () => stdoutEnded = true);
+					child.stderr.on("end", () => stderrEnded = true);
+					child.on("error", reject);
+					child.on("close", code => {
+						if (code !== 0 || output !== "x".repeat(4096) || !stdoutEnded || !stderrEnded) {
+							reject(new Error("close before complete output: code=" + code +
+								", bytes=" + output.length + ", stdoutEnd=" + stdoutEnded + ", stderrEnd=" + stderrEnded));
+						} else resolve();
+					});
+					// Keep the JS turn busy while the short-lived child exits and
+					// Go readers queue output callbacks. close must still follow them.
+					const deadline = Date.now() + 20;
+					while (Date.now() < deadline) {}
+				});
+			}
+			return true;
+		}
+	`, Options{NodeJS: true, AllowExec: true, BaseDir: t.TempDir(), Console: io.Discard, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsRuntime.Close()
+	if err := jsRuntime.Call("verify", os.Args[0], childHelperEnvironment("output")); err != nil {
+		t.Fatalf("child_process close ordering failed: %v", err)
+	}
+}
+
 func TestFSStreams(t *testing.T) {
 	runtime := newStreamRuntime(t, `
 		async function verify() {
