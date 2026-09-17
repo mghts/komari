@@ -173,7 +173,7 @@ show_banner() {
 # 使用明确版本，避免尚无正式 Release 时 latest 指向不存在的资源。
 select_version() {
     local version
-    version=$(ui_input "选择 fork 版本" "输入 mghts/komari Release 版本（如 1.4.4-rc.2）：" "$INSTALL_VERSION") || return 1
+    version=$(ui_input "选择 fork 版本" "输入 mghts/komari Release 版本（如 1.4.5）：" "$INSTALL_VERSION") || return 1
     if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
         ui_msgbox "错误" "必须输入明确的 Release 版本，不能使用 latest 或 Snapshot。"
         return 1

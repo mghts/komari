@@ -16,8 +16,8 @@
 
 ```bash
 docker build --target test -t komari-tests .
-docker build --build-arg VERSION=1.4.4-rc.1 --build-arg REVISION="$(git rev-parse HEAD)" -t komari:test .
-python3 scripts/smoke.py komari:test 1.4.4-rc.1
+docker build --build-arg VERSION=0.0.0-dev --build-arg REVISION="$(git rev-parse HEAD)" -t komari:test .
+python3 scripts/smoke.py komari:test 0.0.0-dev
 ```
 
 Dockerfile 会自行取回锁定的前端并编译，不需要手工复制 dist。集成测试创建独立 Docker 网络、随机测试账号和临时数据目录，验证首次安装、登录、前端 HTML、版本信息、Agent 指标、远程测试命令、Agent 重启、Server 容器替换及节点持久化。测试结束停止容器并保留数据、备份和网络以供检查，不触碰生产数据。
