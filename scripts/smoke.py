@@ -68,7 +68,9 @@ def wait_for(check, description, timeout=90):
 def start_server(suffix):
     global base
     name = network+'-'+suffix
+    # Keep bind-mounted SQLite files writable by this test's fixture editor on Linux.
     docker('run', '-d', '--name', name, '--network', network, '--network-alias', 'server',
+           '--user', str(os.getuid())+':'+str(os.getgid()),
            '-p', '127.0.0.1::25774', '--mount', 'type=bind,src='+str(data)+',dst=/app/data', image)
     containers.append(name)
     port = json.loads(docker('inspect', name))[0]['NetworkSettings']['Ports']['25774/tcp'][0]['HostPort']
