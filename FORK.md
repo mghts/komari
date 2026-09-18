@@ -55,7 +55,7 @@ docker compose logs --tail=100
 1. 保存旧镜像版本/digest、Compose、`.env`、反向代理配置。
 2. 停止 Server，对完整数据目录做一致性备份，包括主库、指标库、插件和主题。若配置了外部数据库，还要单独备份对应数据库。
 3. 修改 `.env` 的 `KOMARI_VERSION`，执行 `docker compose pull` 和 `docker compose up -d`。
-4. 检查登录、节点上线、历史指标、插件和日志；确认正常后再迁移其他节点。
+4. 检查登录、节点上线、历史指标、主题、通知和日志；确认正常后再迁移其他节点。
 
 仅运行 `docker compose restart` 不会换用新镜像。挂载的数据目录会保留，但容器保留数据不等于数据库迁移可逆。需要恢复备份时，先停止 Server，把失败后的数据目录移到独立保留位置，再将备份恢复到原位置，使用旧镜像启动；不得直接覆盖仍在使用的数据。
 
@@ -74,5 +74,14 @@ Agent 发布说明、安装器和 Compose 见 [mghts/komari-agent](https://githu
 - Server/Agent 镜像和二进制来自 `mghts` 的明确版本；RC 不使用 `latest` 或旧 Snapshot 通道。
 - `install-komari.sh` 的 systemd 安装要求输入明确版本，仅支持 Linux amd64/arm64；下载二进制和 `SHA256SUMS` 并验证后才停止旧服务，保留旧二进制。二进制回退不撤销数据库迁移，升级前仍需一致性数据备份。Docker 部署继续按本文步骤操作。
 - 导航、帮助、关于页面和默认主题信息指向 fork。Go module/import、许可证作者、上游基线和历史工作流保留原信息。
-- 主题市场 `komari-monitor/theme-market` 与插件市场 `komari-monitor/plugin-market` 是独立的公共目录，继续使用；它们不是 Server/Agent 的安装或自动更新源。第三方主题、插件及已有数据库中的自定义来源不会被此修复覆盖。
+- 主题市场 `komari-monitor/theme-market` 是独立的公共目录，继续使用；它不是 Server/Agent 的安装或自动更新源。插件市场已移除，第三方主题及已有数据库中的自定义主题来源保留。
 - 前端 CI 的 `npm run check:fork` 检查运行代码中的上游地址和安装命令。Server 构建额外核对前端 `AGENT_VERSION` 与 `build/agent.json` 一致；`python3 scripts/check_fork.py` 检查 Server 活跃入口。
+
+## 插件与 JavaScript 通知移除
+
+本 fork 自 Server `1.4.6` 起移除插件系统、插件市场、插件页面和 `Javascript` 通知发送器，以及仅供它们使用的 JavaScript 运行时。主题系统、其他通知渠道、通知模板、内置流量报告、网页终端、远程命令、网络探测与指标存储保留。
+
+- 旧插件 REST 接口返回 404，插件 RPC 方法不再注册，分片上传不再接受 `plugin` 类型。磁盘上的旧插件不会被加载或执行。
+- 旧插件目录、数据表、市场配置和通知脚本不自动删除；备份继续保留历史插件数据，便于回退。新安装不再创建插件目录或插件配置表。
+- 原通知渠道若为 `Javascript`，该渠道将停止发送通知，后台通知渠道页会提示重新选择受支持的渠道；日志记录不可用状态。原渠道选择及脚本保留，普通通知模板与其他渠道不变。
+- 升级前按前文备份完整数据目录；回退使用原版本镜像及升级前的一致性备份。本次不执行删除旧表或旧字段的数据迁移。

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -49,7 +50,7 @@ def rpc(method, params=None):
     result = request('/api/rpc2', {'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params or {}})
     if 'error' in result:
         raise RuntimeError(method + ': ' + str(result['error']))
-    return result['result']
+    return result.get('result')
 
 def wait_for(check, description, timeout=90):
     last_error = None
@@ -78,6 +79,31 @@ def login():
     response = request('/api/login', {'username': 'smoke-admin', 'password': password})
     return response.get('status') == 'success'
 
+def assert_retired_interfaces():
+    for method in ['listPlugins', 'setPluginEnabled', 'getPluginLogs', 'deletePlugin',
+                   'getPluginConfiguration', 'setPluginConfiguration']:
+        result = request('/api/rpc2', {'jsonrpc': '2.0', 'id': 1, 'method': 'admin:'+method, 'params': {}})
+        assert result.get('error', {}).get('code') == -32601, 'retired RPC still available: '+method
+    for path, payload, status in [
+        ('/api/plugin/retired/index.html', None, 404),
+        ('/api/admin/plugin/list', None, 404),
+        ('/api/admin/plugin/market/catalog', None, 404),
+        ('/api/admin/upload/init', {'purpose': 'plugin', 'filename': 'plugin.zip', 'size': 1}, 400),
+    ]:
+        raw = None if payload is None else json.dumps(payload).encode()
+        req = urllib.request.Request(base+path, data=raw, headers={'Content-Type': 'application/json', 'Origin': base})
+        try:
+            with opener.open(req, timeout=5) as response:
+                raise AssertionError('retired interface returned '+str(response.status)+': '+path)
+        except urllib.error.HTTPError as error:
+            assert error.code == status, path+': unexpected HTTP '+str(error.code)
+    providers = rpc('admin:getMessageSenderProvider')
+    assert 'Javascript' not in providers, 'retired notification provider still listed'
+    for provider in ['empty', 'email', 'telegram', 'webhook', 'bark']:
+        assert provider in providers, 'supported notification provider missing: '+provider
+    assert request('/api/admin/theme/list')['status'] == 'success', 'theme management unavailable'
+    assert request('/api/admin/theme/market/sources')['status'] == 'success', 'theme market unavailable'
+
 try:
     docker('network', 'create', network)
     first_server = start_server('server-1')
@@ -90,6 +116,8 @@ try:
     assert rpc('public:getVersion')['version'] == version, 'embedded Server version mismatch'
     with opener.open(base+'/admin', timeout=5) as response:
         assert b'<html' in response.read().lower(), 'frontend HTML missing'
+    assert_retired_interfaces()
+    assert not (data/'plugin').exists(), 'fresh installation created a plugin directory'
     client = rpc('admin:addClient', {'name': 'smoke-agent'})
     node_token = client['token']
     uuid = client['uuid']
@@ -115,12 +143,35 @@ try:
     docker('stop', agent)
     docker('stop', first_server)
     shutil.copytree(data, root/'stopped-data-backup')
+    # Simulate files and notification selection retained from an older release.
+    legacy_plugin = data/'plugin'/'retired'
+    legacy_plugin.mkdir(parents=True)
+    legacy_script = 'function load() { throw new Error("RETIRED_PLUGIN_EXECUTED"); }'
+    (legacy_plugin/'script.js').write_text(legacy_script)
+    (legacy_plugin/'komari-plugin.json').write_text(json.dumps({
+        'name': 'Retired smoke fixture', 'short': 'retired', 'version': '1.0.0', 'entry': 'script.js'}))
+    (data/'plugin'/'state.json').write_text(json.dumps({'plugins': {'retired': {'enabled': True}}}))
+    legacy_notification = json.dumps({'script': 'throw new Error("RETIRED_NOTIFICATION_EXECUTED");'})
+    with sqlite3.connect(data/'komari.db') as db:
+        assert db.execute("SELECT count(*) FROM sqlite_master WHERE name='plugin_configurations'").fetchone()[0] == 0, 'fresh database created a plugin table'
+        db.execute('INSERT OR REPLACE INTO message_sender_providers(name, addition) VALUES (?, ?)', ('Javascript', legacy_notification))
+        db.execute('INSERT OR REPLACE INTO configs(key, value) VALUES (?, ?)', ('notification_method', json.dumps('Javascript')))
     start_server('server-2')
     wait_for(login, 'login with persisted account after container replacement')
     assert rpc('admin:getClient', {'uuid': uuid})['uuid'] == uuid, 'node did not persist'
     docker('start', agent)
     wait_for(online, 'Agent reconnects after Server replacement')
-    print('PASS: install, login, frontend, versions, metrics, remote task, Agent restart, Server recreation and persisted node.')
+    assert_retired_interfaces()
+    assert rpc('admin:getSettings')['notification_method'] == 'Javascript', 'legacy selection was overwritten'
+    assert (legacy_plugin/'script.js').read_text() == legacy_script, 'legacy plugin files changed'
+    with sqlite3.connect(data/'komari.db') as db:
+        assert db.execute('SELECT addition FROM message_sender_providers WHERE name=?', ('Javascript',)).fetchone()[0] == legacy_notification, 'legacy script changed'
+    log_result = subprocess.run(['docker', 'logs', network+'-server-2'], text=True, capture_output=True, check=True)
+    server_logs = log_result.stdout + log_result.stderr
+    assert 'RETIRED_PLUGIN_EXECUTED' not in server_logs and 'RETIRED_NOTIFICATION_EXECUTED' not in server_logs, 'retired script executed'
+    assert 'Configured notification provider "Javascript" is unavailable' in server_logs, 'missing legacy notification warning'
+    rpc('admin:editSettings', {'notification_method': 'empty'})
+    print('PASS: install, login, frontend, metrics, remote task, restarts, persistence, retired interfaces, retained themes/channels and legacy data.')
     print('Retained test data and stopped-data backup: '+str(root))
 except Exception as error:
     message = str(error).replace(password, '[redacted]')

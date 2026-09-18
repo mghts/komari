@@ -15,7 +15,9 @@ var backupWhitelist = []string{
 	"favicon.ico",
 	"font.ttf",
 	"theme/",
+	// Preserve retired plugin data for rollback; no plugin code is loaded.
 	"plugin/",
+	"plugin-data/",
 	"plguin-data/",
 	"metrics.db",
 }

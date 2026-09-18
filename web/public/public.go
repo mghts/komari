@@ -287,6 +287,13 @@ func static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc), force
 
 	// 3. SPA 路由 (noRoute)
 	noRoute(func(c *gin.Context) {
+		// Retired plugin APIs must not fall back to frontend HTML or theme files.
+		for _, prefix := range []string{"/api/plugin", "/api/admin/plugin"} {
+			if c.Request.URL.Path == prefix || strings.HasPrefix(c.Request.URL.Path, prefix+"/") {
+				c.Status(http.StatusNotFound)
+				return
+			}
+		}
 		if c.Request.Method != http.MethodGet {
 			c.Status(http.StatusNotFound)
 			return

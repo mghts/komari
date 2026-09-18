@@ -73,6 +73,12 @@ func Initialize() {
 		return
 	}
 
+	if _, exists := factory.GetConstructor(NotificationMethod); !exists {
+		_ = Shutdown()
+		logger.Errorf("message-sender", "Configured notification provider %q is unavailable; select a supported channel in notification settings. Saved configuration is retained.", NotificationMethod)
+		return
+	}
+
 	// 尝试从数据库加载配置
 	senderConfig, err := database.GetMessageSenderConfigByName(NotificationMethod)
 	if err != nil {

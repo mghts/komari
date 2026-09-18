@@ -29,6 +29,9 @@ func adminGetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	}
 	req.BindParams(&params)
 	if params.Provider != "" {
+		if _, exists := msfactory.GetConstructor(params.Provider); !exists {
+			return nil, rpc.MakeError(rpc.NotFound, "Provider not found: "+params.Provider, nil)
+		}
 		cfg, err := database.GetMessageSenderConfigByName(params.Provider)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.NotFound, "Provider not found: "+err.Error(), nil)

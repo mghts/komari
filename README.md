@@ -22,7 +22,7 @@ Komari is a lightweight, self-hosted server monitoring solution. It provides a s
 - **Lightweight and efficient**: Uses minimal system resources and works well on servers of any size.
 - **Self-hosted**: Keeps you in control of your data and privacy.
 - **Web interface**: Provides an intuitive, easy-to-use monitoring dashboard.
-- **Extensible**: Supports custom themes and plugins.
+- **Customizable**: Supports custom themes. This fork has removed plugins and JavaScript notification senders; see [FORK.md](FORK.md).
 
 ## Quick Start
 

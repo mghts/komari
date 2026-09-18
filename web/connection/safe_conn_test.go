@@ -1,72 +1,16 @@
 package connection
 
 import (
-	"errors"
+	"encoding/json"
+	"fmt"
+	"github.com/gorilla/websocket"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/gorilla/websocket"
+	"time"
 )
-
-// recordingInterceptor captures calls and applies simple rewrites.
-type recordingInterceptor struct {
-	mu             sync.Mutex
-	connects       []*ConnInfo
-	lastInfo       *ConnInfo
-	messages       []string
-	sends          []string
-	closes         int
-	dropMessage    bool
-	dropSend       bool
-	rewriteMessage bool
-}
-
-func (r *recordingInterceptor) OnConnect(info *ConnInfo) (bool, string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.connects = append(r.connects, info)
-	return false, ""
-}
-
-func (r *recordingInterceptor) OnMessage(info *ConnInfo, frameType int, data []byte) (int, []byte, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.lastInfo = info
-	r.messages = append(r.messages, string(data))
-	if r.dropMessage {
-		return frameType, nil, true
-	}
-	if r.rewriteMessage {
-		return frameType, []byte("rewritten:" + string(data)), false
-	}
-	return frameType, data, false
-}
-
-func (r *recordingInterceptor) OnSend(info *ConnInfo, frameType int, data []byte) (int, []byte, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.lastInfo = info
-	r.sends = append(r.sends, string(data))
-	if r.dropSend {
-		return frameType, nil, true
-	}
-	return frameType, data, false
-}
-
-func (r *recordingInterceptor) OnClose(info *ConnInfo) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.closes++
-}
-
-func (r *recordingInterceptor) calls() (info *ConnInfo, messages []string, sends []string, closes int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.lastInfo, append([]string(nil), r.messages...), append([]string(nil), r.sends...), r.closes
-}
 
 // wsEchoServer upgrades every request and echoes each frame back.
 func wsEchoServer(t *testing.T) *httptest.Server {
@@ -100,155 +44,72 @@ func dialEcho(t *testing.T, server *httptest.Server) *SafeConn {
 	return NewSafeConn(conn)
 }
 
-// TestSafeConnInterceptorWired 验证读写帧都经过拦截器，且连接信息与 ID 一致。
-func TestSafeConnInterceptorWired(t *testing.T) {
+func TestSafeConnPreservesFramesAndJSON(t *testing.T) {
 	server := wsEchoServer(t)
 	defer server.Close()
 	sc := dialEcho(t, server)
 	defer sc.Close()
-
-	rec := &recordingInterceptor{}
-	info := &ConnInfo{ID: sc.ID, Path: "/api/clients/v2/rpc", RemoteIP: "203.0.113.9"}
-	sc.SetInterceptor(info, rec)
-
-	if err := sc.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
-		t.Fatal(err)
-	}
-	mt, data, err := sc.ReadMessage()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mt != websocket.TextMessage || string(data) != "ping" {
-		t.Fatalf("echo = type %d data %q", mt, data)
-	}
-	info, messages, sends, _ := rec.calls()
-	if len(messages) != 1 || len(sends) != 1 || messages[0] != "ping" || sends[0] != "ping" {
-		t.Fatalf("interceptor calls = messages %v sends %v", messages, sends)
-	}
-	// 帧回调收到的连接信息与附加时一致（OnConnect 由升级层调用，这里不做断言）。
-	if info == nil || info.ID != sc.ID || info.Path != "/api/clients/v2/rpc" {
-		t.Fatalf("frame info = %+v", info)
-	}
-}
-
-// TestSafeConnRewriteAndWriteJSON 验证帧改写（读侧）与 WriteJSON 走同一拦截通道。
-func TestSafeConnRewriteAndWriteJSON(t *testing.T) {
-	server := wsEchoServer(t)
-	defer server.Close()
-	sc := dialEcho(t, server)
-	defer sc.Close()
-
-	rec := &recordingInterceptor{rewriteMessage: true}
-	sc.SetInterceptor(&ConnInfo{ID: sc.ID, Path: "/x"}, rec)
-
-	if err := sc.WriteJSON(map[string]any{"a": 1}); err != nil {
-		t.Fatal(err)
-	}
-	mt, data, err := sc.ReadMessage()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mt != websocket.TextMessage || !strings.HasPrefix(string(data), "rewritten:") {
-		t.Fatalf("read = type %d data %q", mt, data)
-	}
-	// WriteJSON 编码后的 JSON 文本也经过 wsSend 钩子。
-	_, sends, _, _ := rec.calls()
-	if len(sends) != 1 || !strings.Contains(sends[0], "\"a\"") {
-		t.Fatalf("sends = %v", sends)
-	}
-}
-
-// TestSafeConnDropSkipsFrame 验证被丢弃的帧被透明跳过，读侧只看到后续帧。
-func TestSafeConnDropSkipsFrame(t *testing.T) {
-	server := wsEchoServer(t)
-	defer server.Close()
-	sc := dialEcho(t, server)
-	defer sc.Close()
-
-	rec := &recordingInterceptor{dropMessage: true}
-	sc.SetInterceptor(&ConnInfo{ID: sc.ID, Path: "/x"}, rec)
-
-	// 发三帧：全部被丢弃；读侧应在连续丢弃达到上限后收到错误，而不是空数据。
-	if err := sc.WriteMessage(websocket.TextMessage, []byte("a")); err != nil {
-		t.Fatal(err)
-	}
-	if err := sc.WriteMessage(websocket.TextMessage, []byte("b")); err != nil {
-		t.Fatal(err)
-	}
-	if err := sc.WriteMessage(websocket.TextMessage, []byte("c")); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < maxConsecutiveDroppedFrames-3; i++ {
-		if err := sc.WriteMessage(websocket.TextMessage, []byte("x")); err != nil {
+	_ = sc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for _, kind := range []int{websocket.TextMessage, websocket.BinaryMessage} {
+		if err := sc.WriteMessage(kind, []byte("plain")); err != nil {
 			t.Fatal(err)
 		}
+		gotKind, data, err := sc.ReadMessage()
+		if err != nil || gotKind != kind || string(data) != "plain" {
+			t.Fatalf("frame changed: %d %q %v", gotKind, data, err)
+		}
 	}
-	if _, _, err := sc.ReadMessage(); !errors.Is(err, errTooManyDroppedFrames) {
-		t.Fatalf("expected errTooManyDroppedFrames, got %v", err)
-	}
-}
-
-// TestSafeConnDropSend 验证写侧丢弃：被丢弃的帧不会发到对端，后续帧不受影响。
-func TestSafeConnDropSend(t *testing.T) {
-	server := wsEchoServer(t)
-	defer server.Close()
-	sc := dialEcho(t, server)
-	defer sc.Close()
-
-	rec := &recordingInterceptor{dropSend: true}
-	sc.SetInterceptor(&ConnInfo{ID: sc.ID, Path: "/x"}, rec)
-
-	if err := sc.WriteMessage(websocket.TextMessage, []byte("hidden")); err != nil {
+	if err := sc.WriteJSON(map[string]string{"message": "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	// 关闭丢弃后发送的帧应该正常到达服务端并回显。
-	rec.mu.Lock()
-	rec.dropSend = false
-	rec.mu.Unlock()
-	if err := sc.WriteMessage(websocket.TextMessage, []byte("visible")); err != nil {
-		t.Fatal(err)
+	var got map[string]string
+	if err := sc.ReadJSON(&got); err != nil || got["message"] != "hello" {
+		t.Fatalf("JSON changed: %v %v", got, err)
 	}
-	mt, data, err := sc.ReadMessage()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "visible" || mt != websocket.TextMessage {
-		t.Fatalf("echo = %q (dropped frame must not reach the peer)", data)
-	}
-}
-
-// TestSafeConnNoInterceptorZeroCost 验证未挂拦截器时读写路径原样工作。
-func TestSafeConnNoInterceptorZeroCost(t *testing.T) {
-	server := wsEchoServer(t)
-	defer server.Close()
-	sc := dialEcho(t, server)
-	defer sc.Close()
-
-	if err := sc.WriteMessage(websocket.TextMessage, []byte("plain")); err != nil {
-		t.Fatal(err)
-	}
-	_, data, err := sc.ReadMessage()
-	if err != nil || string(data) != "plain" {
-		t.Fatalf("read = %q err %v", data, err)
-	}
-}
-
-// TestSafeConnOnCloseOnce 验证 Close 只触发一次 OnClose。
-func TestSafeConnOnCloseOnce(t *testing.T) {
-	server := wsEchoServer(t)
-	defer server.Close()
-	sc := dialEcho(t, server)
-
-	rec := &recordingInterceptor{}
-	sc.SetInterceptor(&ConnInfo{ID: sc.ID, Path: "/x"}, rec)
-
 	if err := sc.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// 第二次关闭连接已关闭：返回错误是预期行为，OnClose 只应触发一次。
-	_ = sc.Close()
-	_, _, _, closes := rec.calls()
-	if closes != 1 {
-		t.Fatalf("OnClose fired %d times", closes)
+	if _, _, err := sc.ReadMessage(); err == nil {
+		t.Fatal("closed connection remained readable")
 	}
+}
+
+func TestSafeConnConcurrentWritesRemainComplete(t *testing.T) {
+	server := wsEchoServer(t)
+	defer server.Close()
+	sc := dialEcho(t, server)
+	defer sc.Close()
+	_ = sc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	const count = 40
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			var err error
+			if id%2 == 0 {
+				err = sc.WriteJSON(map[string]int{"id": id})
+			} else {
+				err = sc.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":%d}`, id)))
+			}
+			if err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	seen := map[int]bool{}
+	for i := 0; i < count; i++ {
+		kind, data, err := sc.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var item struct {
+			ID int `json:"id"`
+		}
+		if kind != websocket.TextMessage || json.Unmarshal(data, &item) != nil || seen[item.ID] {
+			t.Fatalf("invalid or duplicate frame: %q", data)
+		}
+		seen[item.ID] = true
+	}
+	wg.Wait()
 }

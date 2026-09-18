@@ -6,7 +6,6 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_MARKETS = {
     'https://raw.githubusercontent.com/komari-monitor/theme-market/main/v1.json',
-    'https://raw.githubusercontent.com/komari-monitor/plugin-market/main/v1.json',
 }
 for directory in ['cmd', 'internal', 'web', 'utils', 'deploy', '.github/actions', '.github/workflows']:
     for path in (ROOT / directory).rglob('*'):

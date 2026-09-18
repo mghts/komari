@@ -45,13 +45,13 @@
 声明自定义权限（供插件使用）：
 
 ```go
-rpc.Allow("plugin:*", rpc.RoleClient)        // 整个命名空间
-rpc.Allow("plugin:publicStat", rpc.RoleGuest) // 更具体的方法级规则可放宽
-rpc.RegisterNamespace("plugin", rpc.RoleAdmin) // 等价于 Allow("plugin:*", admin)
+rpc.Allow("extension:*", rpc.RoleClient)        // 整个命名空间
+rpc.Allow("extension:publicStat", rpc.RoleGuest) // 更具体的方法级规则可放宽
+rpc.RegisterNamespace("extension", rpc.RoleAdmin) // 等价于 Allow("extension:*", admin)
 ```
 
-由于按特异性裁决，`plugin:*`=admin 与 `plugin:publicStat`=guest 可共存：访客能调用 `publicStat`，
-其余 `plugin:*` 方法仍要求 admin。
+由于按特异性裁决，`extension:*`=admin 与 `extension:publicStat`=guest 可共存：访客能调用 `publicStat`，
+其余 `extension:*` 方法仍要求 admin。
 
 ## 注册一个 RPC 方法
 
@@ -136,6 +136,6 @@ r.GET("/api/admin/client/:uuid", jsonRpc.Bind("admin:getClient", jsonRpc.WithPat
 ### 保留为 REST 的接口（不走 RPC 桥）
 
 二进制/流/重定向/特殊鉴权类，集中在 `web/api/admin`（2fa/theme/backup/update/oauth 绑定）、
-`web/api/public`（login/logout/oauth/plugin）、`web/api/client`（report WS+POST、v2 RPC、uploadBasicInfo、terminal、AutoDiscovery 注册）。
+`web/api/public`（login/logout/oauth）、`web/api/client`（report WS+POST、v2 RPC、uploadBasicInfo、terminal、AutoDiscovery 注册）。
 
 agent v1/v2 上报的核心逻辑已统一到 `web/api/client/ingest.go`。
