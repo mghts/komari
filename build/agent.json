@@ -1,6 +1,6 @@
 {
   "upstream_version": "1.2.60",
-  "version": "1.2.61",
-  "commit": "f15795275ca2a9bb9e53354a13273a692c5dfe78",
-  "image": "ghcr.io/mghts/komari-agent@sha256:cad9bed331a06f329ef38eed670fff5b6a0a7ef7a923cb5b52d0fec18f9b381d"
+  "version": "1.2.62",
+  "commit": "e1e3bd91ce835641aad28e05173a1cebc9e4ef1b",
+  "image": "ghcr.io/mghts/komari-agent@sha256:3f3cc5aaff551fa509906e7e76709387ac62c2886e5750e7aaa9a2e9c3e5f273"
 }
