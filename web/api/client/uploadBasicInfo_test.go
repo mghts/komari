@@ -55,6 +55,8 @@ func TestV2BasicInfoFillsRegionFromGeoIP(t *testing.T) {
 		UUID:      clientUUID,
 		Token:     "token-v2-geoip",
 		Name:      "client_v2_geoip",
+		Hidden:    true,
+		Price:     12.5,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}).Error; err != nil {
@@ -66,7 +68,12 @@ func TestV2BasicInfoFillsRegionFromGeoIP(t *testing.T) {
 		Method:  v2.MethodAgentBasicInfo,
 		Params: map[string]interface{}{
 			"info": map[string]interface{}{
-				"ipv4": "8.8.8.8",
+				"ipv4":   "8.8.8.8",
+				"token":  "forged-token",
+				"hidden": false,
+				"price":  0,
+				"name":   "forged-name",
+				"region": "forged-region",
 			},
 		},
 		ID: "basic-info",
@@ -82,5 +89,8 @@ func TestV2BasicInfoFillsRegionFromGeoIP(t *testing.T) {
 	want := geoip.GetRegionUnicodeEmoji("SG")
 	if got.Region != want {
 		t.Fatalf("expected GeoIP region to be saved, got %q", got.Region)
+	}
+	if got.Token != "token-v2-geoip" || !got.Hidden || got.Price != 12.5 || got.Name != "client_v2_geoip" {
+		t.Fatalf("agent changed administrator-owned fields: %+v", got)
 	}
 }

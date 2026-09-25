@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
@@ -54,6 +55,22 @@ func Login(c *gin.Context) {
 	}
 	if data.Username == "" || data.Password == "" {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request body: Username and password are required")
+		return
+	}
+	if len(data.Username) > 256 {
+		api.RespondError(c, http.StatusBadRequest, "Invalid username")
+		return
+	}
+	if !passwordLoginLimiter.Allow(remoteLoginIP(c.Request.RemoteAddr), data.Username, time.Now()) {
+		c.Header("Retry-After", "300")
+		api.RespondError(c, http.StatusTooManyRequests, "Too many login attempts")
+		return
+	}
+	select {
+	case passwordHashSlots <- struct{}{}:
+		defer func() { <-passwordHashSlots }()
+	default:
+		api.RespondError(c, http.StatusTooManyRequests, "Too many concurrent login attempts")
 		return
 	}
 

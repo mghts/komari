@@ -24,6 +24,7 @@ func getClientIPType(ip net.IP) int {
 
 func saveClientBasicInfo(info map[string]interface{}, uuid string, fallbackIP string) error {
 	info["uuid"] = uuid
+	delete(info, "region") // Only the server's GeoIP lookup may set this field.
 	applyFallbackClientIP(info, fallbackIP)
 	appendClientRegionFromGeoIP(info)
 	return clients.SaveClientInfo(info)

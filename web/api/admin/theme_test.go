@@ -2,6 +2,7 @@ package admin
 
 import (
 	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,6 +51,68 @@ func TestIsValidThemeShort_PathTraversal(t *testing.T) {
 		if !isValidMarketShort(in) {
 			t.Errorf("isValidMarketShort(%q) = false, want true (合法名称被误拒)", in)
 		}
+	}
+}
+
+func TestFailedThemeReplacementRetainsInstalledTheme(t *testing.T) {
+	zipPath := filepath.Join(t.TempDir(), "corrupt-theme.zip")
+	file, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	for _, item := range []struct{ name, content string }{
+		{"komari-theme.json", `{"name":"Test","short":"retain","version":"1.0.0"}`},
+		{"asset.txt", "corrupt-me"},
+	} {
+		entry, err := writer.CreateHeader(&zip.FileHeader{Name: item.name, Method: zip.Store})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(item.content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := os.ReadFile(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := bytes.Index(archive, []byte("corrupt-me"))
+	if index < 0 {
+		t.Fatal("stored ZIP entry was not found")
+	}
+	archive[index] ^= 1
+	if err := os.WriteFile(zipPath, archive, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(workDir) })
+	oldPath := filepath.Join("data", "theme", "retain", "old.txt")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldPath, []byte("old theme"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractAndValidateTheme(zipPath); err == nil {
+		t.Fatal("corrupt theme update unexpectedly succeeded")
+	}
+	content, err := os.ReadFile(oldPath)
+	if err != nil || string(content) != "old theme" {
+		t.Fatalf("old theme was lost: content=%q err=%v", content, err)
 	}
 }
 

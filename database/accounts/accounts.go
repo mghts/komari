@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"gorm.io/gorm"
 )
 
@@ -25,8 +27,23 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 		// 静默处理错误，不显示日志
 		return "", false
 	}
-	if hashPasswd(passwd) != user.Passwd {
+	if isArgon2idHash(user.Passwd) {
+		if !verifyPasswordHash(passwd, user.Passwd) {
+			return "", false
+		}
+		return user.UUID, true
+	}
+	if subtle.ConstantTimeCompare([]byte(hashPasswd(passwd)), []byte(user.Passwd)) != 1 {
 		return "", false
+	}
+	// Upgrade legacy hashes only after a successful login. The conditional
+	// update does not overwrite a concurrent password change.
+	if upgraded, err := generatePasswordHash(passwd); err == nil {
+		if err := db.Model(&models.User{}).Where("uuid = ? AND passwd = ?", user.UUID, user.Passwd).Update("passwd", upgraded).Error; err != nil {
+			logger.Warnf("accounts", "failed to upgrade legacy password hash: %v", err)
+		}
+	} else {
+		logger.Warnf("accounts", "failed to hash password during legacy upgrade: %v", err)
 	}
 	return user.UUID, true
 }
@@ -34,7 +51,11 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 // ForceResetPassword 强制重置用户密码
 func ForceResetPassword(username, passwd string) (err error) {
 	db := dbcore.GetDBInstance()
-	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashPasswd(passwd))
+	hashedPassword, err := generatePasswordHash(passwd)
+	if err != nil {
+		return err
+	}
+	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashedPassword)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -58,7 +79,10 @@ func CreateAccount(username, passwd string) (user models.User, err error) {
 }
 
 func CreateAccountWithDB(db *gorm.DB, username, passwd string) (user models.User, err error) {
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := generatePasswordHash(passwd)
+	if err != nil {
+		return models.User{}, err
+	}
 	user = models.User{
 		UUID:     uuid.New().String(),
 		Username: username,
@@ -137,7 +161,11 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 		updates["username"] = *name
 	}
 	if password != nil {
-		updates["passwd"] = hashPasswd(*password)
+		hashedPassword, err := generatePasswordHash(*password)
+		if err != nil {
+			return err
+		}
+		updates["passwd"] = hashedPassword
 	}
 	if sso_type != nil {
 		updates["sso_type"] = *sso_type

@@ -2,8 +2,10 @@ package dbcore
 
 import (
 	"archive/zip"
+	"database/sql"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/internal/migrations"
 	"github.com/komari-monitor/komari/internal/sqlitetune"
 	logger "github.com/komari-monitor/komari/utils/log"
+	"github.com/komari-monitor/komari/web/backup"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -36,7 +39,6 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) e
 	defer out.Close()
 
 	zw := zip.NewWriter(out)
-	defer zw.Close()
 
 	absSrc, _ := filepath.Abs(srcDir)
 	walkErr := filepath.Walk(absSrc, func(path string, info os.FileInfo, err error) error {
@@ -86,7 +88,13 @@ func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) e
 	if walkErr != nil {
 		return walkErr
 	}
-	return zw.Close()
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	return out.Close()
 }
 
 // removeAllInDirExcept 删除 dir 下除 exclude 指定绝对路径外的所有文件和文件夹
@@ -161,6 +169,46 @@ func unzipToDir(zipPath, dstDir string) error {
 		}
 		out.Close()
 		rc.Close()
+	}
+	return nil
+}
+
+func validateStagedDatabase(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open restored database: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat restored database: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() < 100 {
+		return fmt.Errorf("restored database is not a valid SQLite file")
+	}
+	header := make([]byte, 16)
+	if _, err := io.ReadFull(file, header); err != nil || string(header) != "SQLite format 3\x00" {
+		return fmt.Errorf("restored database has an invalid SQLite header")
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	databaseURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(absPath)}
+	query := databaseURL.Query()
+	query.Set("mode", "ro")
+	databaseURL.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite3", databaseURL.String())
+	if err != nil {
+		return fmt.Errorf("open restored SQLite database: %w", err)
+	}
+	defer db.Close()
+	var result string
+	if err := db.QueryRow("PRAGMA quick_check").Scan(&result); err != nil {
+		return fmt.Errorf("check restored SQLite database: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("restored SQLite database failed quick_check: %s", result)
 	}
 	return nil
 }
@@ -341,35 +389,53 @@ func Close() error {
 func doInitialize() error {
 	var err error
 
-	// 在数据库初始化前执行：如果存在 ./data/backup.zip，则进行恢复逻辑
-	func() {
+	// Validate the full archive and retain a verified copy of the old data
+	// before removing anything. A restore failure must stop startup.
+	if err := func() error {
 		backupZipPath := filepath.Join(".", "data", "backup.zip")
 		if _, statErr := os.Stat(backupZipPath); statErr == nil {
+			if err := backup.ValidateArchive(backupZipPath); err != nil {
+				return fmt.Errorf("invalid pending backup: %w", err)
+			}
+			stageDir, err := os.MkdirTemp("./data", ".restore-stage-")
+			if err != nil {
+				return fmt.Errorf("create restore staging directory: %w", err)
+			}
+			defer os.RemoveAll(stageDir)
+			if err := unzipToDir(backupZipPath, stageDir); err != nil {
+				return fmt.Errorf("stage pending backup: %w", err)
+			}
+			if err := validateStagedDatabase(filepath.Join(stageDir, "komari.db")); err != nil {
+				return err
+			}
+			stagedEntries, err := os.ReadDir(stageDir)
+			if err != nil {
+				return fmt.Errorf("list staged backup: %w", err)
+			}
 			// 4. 将当前数据快照保存到 ./data/backup/，并保留已有归档。
 			backupDir := filepath.Join(".", "data", "backup")
 			if err := os.MkdirAll(backupDir, 0755); err != nil {
-				logger.Errorf("dbcore", "[restore] failed to create backup dir: %v", err)
-			} else {
-				tsName := time.Now().UTC().Format("20060102-150405")
-				bakPath := filepath.Join(backupDir, fmt.Sprintf("pre-restore-%s.zip", tsName))
-				if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}, backupDir: {}}); zipErr != nil {
-					logger.Errorf("dbcore", "[restore] failed to zip current data: %v", zipErr)
-				} else {
-					logger.Infof("dbcore", "[restore] current data zipped to %s", bakPath)
+				return fmt.Errorf("create pre-restore backup directory: %w", err)
+			}
+			tsName := time.Now().UTC().Format("20060102-150405")
+			bakPath := filepath.Join(backupDir, fmt.Sprintf("pre-restore-%s.zip", tsName))
+			if err := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}, backupDir: {}, stageDir: {}}); err != nil {
+				return fmt.Errorf("create pre-restore backup: %w", err)
+			}
+			logger.Infof("dbcore", "[restore] current data zipped to %s", bakPath)
+
+			// 5. Only after staging and safeguarding the old data, replace it.
+			if delErr := removeAllInDirExcept("./data", map[string]struct{}{backupZipPath: {}, backupDir: {}, stageDir: {}}); delErr != nil {
+				return fmt.Errorf("clean data directory for restore: %w", delErr)
+			}
+
+			// 6. Staged files and the destination are on the same filesystem.
+			for _, entry := range stagedEntries {
+				if err := os.Rename(filepath.Join(stageDir, entry.Name()), filepath.Join("./data", entry.Name())); err != nil {
+					return fmt.Errorf("apply pending backup (pre-restore backup retained at %s): %w", bakPath, err)
 				}
 			}
-
-			// 5. 删除数据文件，但保留归档目录和待恢复的 backup.zip。
-			if delErr := removeAllInDirExcept("./data", map[string]struct{}{backupZipPath: {}, backupDir: {}}); delErr != nil {
-				logger.Errorf("dbcore", "[restore] failed to cleanup data dir: %v", delErr)
-			}
-
-			// 6. 解压 ./data/backup.zip 到 ./data
-			if unzipErr := unzipToDir(backupZipPath, "./data"); unzipErr != nil {
-				logger.Errorf("dbcore", "[restore] failed to unzip backup into data: %v", unzipErr)
-			} else {
-				logger.Infof("dbcore", "[restore] backup.zip extracted to ./data")
-			}
+			logger.Infof("dbcore", "[restore] staged backup applied to ./data")
 
 			// 7. 删除 ./data/backup.zip
 			if rmErr := os.Remove(backupZipPath); rmErr != nil {
@@ -384,7 +450,10 @@ func doInitialize() error {
 				logger.Infof("dbcore", "[restore] komari-backup-markup removed")
 			}
 		}
-	}()
+		return nil
+	}(); err != nil {
+		return err
+	}
 
 	// 记录“打开数据库之前”komari.db 是否已存在，用于区分全新安装与旧版升级。
 	// 必须在（可能的）恢复逻辑之后、gorm.Open 之前采集：恢复会解压出旧库，

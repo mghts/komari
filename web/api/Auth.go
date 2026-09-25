@@ -18,10 +18,34 @@ import (
 )
 
 const (
-	RoleAdmin  = "admin"
-	RoleClient = "client"
-	RoleGuest  = "guest"
+	RoleAdmin                = "admin"
+	RoleClient               = "client"
+	RoleGuest                = "guest"
+	MaxJSONRequestBody int64 = 1 << 20
 )
+
+// LimitRequestBody runs before identity extraction, which may inspect a POST
+// body to find an agent token. Chunk uploads have their own larger limit.
+func LimitRequestBody() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Body == nil {
+			c.Next()
+			return
+		}
+		limit := MaxJSONRequestBody
+		if c.Request.URL.Path == "/api/admin/upload/chunk" || c.Request.URL.Path == "/api/install/upload/chunk" {
+			limit = 6 << 20
+		} else if c.Request.URL.Path == "/api/admin/update/favicon" {
+			limit = 5 << 20
+		}
+		if c.Request.ContentLength > limit {
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Request body too large"})
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+		c.Next()
+	}
+}
 
 // IdentityMiddleware 统一身份识别中间件，在路由栈最外层运行。
 // 负责识别当前请求者身份（Admin / Client / Guest），并写入 Context。

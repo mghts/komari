@@ -48,11 +48,14 @@ func RequestTerminal(c *gin.Context) {
 	conn.SetCloseHandler(func(code int, text string) error {
 		logger.InfoArgs("terminal", "Terminal connection closed:", code, text)
 		TerminalSessionsMutex.Lock()
-		delete(TerminalSessions, id)
+		if TerminalSessions[id] == session {
+			delete(TerminalSessions, id)
+		}
+		agent := session.Agent
 		TerminalSessionsMutex.Unlock()
 		// 通知 Agent 关闭终端连接
-		if session.Agent != nil {
-			session.Agent.Close()
+		if agent != nil {
+			agent.Close()
 		}
 		return nil
 	})
@@ -80,15 +83,15 @@ func RequestTerminal(c *gin.Context) {
 	// 如果没有连接上，则关闭连接
 	time.AfterFunc(30*time.Second, func() {
 		TerminalSessionsMutex.Lock()
-		if session.Agent == nil {
-			if session.Browser != nil {
-				session.Browser.WriteMessage(1, []byte("被控端连接超时 timeout\n"))
-				session.Browser.Close()
-			}
-			conn.Close()
+		timedOut := TerminalSessions[id] == session && session.Agent == nil
+		if timedOut {
 			delete(TerminalSessions, id)
 		}
 		TerminalSessionsMutex.Unlock()
+		if timedOut {
+			conn.WriteMessage(1, []byte("被控端连接超时 timeout\n"))
+			conn.Close()
+		}
 	})
 	//auditlog.Log(c.ClientIP(), user_uuid.(string), "request, terminal id:"+id+",client:"+session.UUID, "terminal")
 }

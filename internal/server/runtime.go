@@ -88,7 +88,7 @@ func (a *App) BuildRouter() error {
 	r := gin.New()
 	r.Use(logger.GinLogger(), logger.GinRecovery())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
-	r.Use(cors.Middleware(), api.IdentityMiddleware(), api.PrivateSiteMiddleware(), noStoreAPIResponses())
+	r.Use(cors.Middleware(), api.LimitRequestBody(), api.IdentityMiddleware(), api.PrivateSiteMiddleware(), noStoreAPIResponses())
 
 	// The recovery UI belongs only to its temporary restricted listener.
 	r.GET(recoveryweb.PagePath, func(c *gin.Context) {

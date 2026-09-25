@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -82,27 +83,8 @@ func (l *RestoreLock) SaveUploadedBackup(file io.Reader, filename string) error 
 	}
 
 	finalPath := filepath.Join(".", "data", "backup.zip")
-	if err := os.Remove(finalPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove previous backup: %w", err)
-	}
-	if err := os.Rename(tempPath, finalPath); err == nil {
-		return nil
-	}
-	in, err := os.Open(tempPath)
-	if err != nil {
-		return fmt.Errorf("prepare backup file: %w", err)
-	}
-	defer in.Close()
-	out, err := os.Create(finalPath)
-	if err != nil {
-		return fmt.Errorf("create backup file: %w", err)
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return fmt.Errorf("write backup file: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("close backup file: %w", err)
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		return fmt.Errorf("publish backup file: %w", err)
 	}
 	return nil
 }
@@ -121,18 +103,62 @@ func ValidateArchive(path string) error {
 	}
 
 	var expandedSize uint64
+	var actualSize int64
 	hasMarkup := false
+	hasContent := false
+	hasDatabase := false
 	for _, entry := range reader.File {
+		cleanName := pathpkg.Clean(entry.Name)
+		if cleanName == "." || cleanName == ".." || strings.HasPrefix(cleanName, "../") || strings.HasPrefix(entry.Name, "/") {
+			return fmt.Errorf("backup archive contains unsafe path: %s", entry.Name)
+		}
+		if cleanName == "backup.zip" || cleanName == "backup" || strings.HasPrefix(cleanName, "backup/") {
+			return fmt.Errorf("backup archive contains reserved path: %s", entry.Name)
+		}
+		if entry.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("backup archive contains symlink: %s", entry.Name)
+		}
 		if entry.Name == "komari-backup-markup" {
 			hasMarkup = true
+		} else if entry.Name == "komari.db" && !entry.FileInfo().IsDir() {
+			hasDatabase = true
+			hasContent = true
+		} else if !entry.FileInfo().IsDir() {
+			hasContent = true
 		}
 		if entry.UncompressedSize64 > uint64(MaxArchiveSize) || expandedSize > uint64(MaxArchiveSize)-entry.UncompressedSize64 {
 			return fmt.Errorf("backup archive expands beyond the %d byte limit", MaxArchiveSize)
 		}
 		expandedSize += entry.UncompressedSize64
+		if entry.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := entry.Open()
+		if err != nil {
+			return fmt.Errorf("open backup entry %s: %w", entry.Name, err)
+		}
+		remaining := MaxArchiveSize - actualSize
+		written, copyErr := io.Copy(io.Discard, io.LimitReader(rc, remaining+1))
+		closeErr := rc.Close()
+		if copyErr != nil {
+			return fmt.Errorf("verify backup entry %s: %w", entry.Name, copyErr)
+		}
+		if written > remaining {
+			return fmt.Errorf("backup archive expands beyond the %d byte limit", MaxArchiveSize)
+		}
+		actualSize += written
+		if closeErr != nil {
+			return fmt.Errorf("close backup entry %s: %w", entry.Name, closeErr)
+		}
 	}
 	if !hasMarkup {
 		return fmt.Errorf("invalid backup file: missing komari-backup-markup file")
+	}
+	if !hasContent {
+		return fmt.Errorf("invalid backup file: no data files")
+	}
+	if !hasDatabase {
+		return fmt.Errorf("invalid backup file: missing komari.db")
 	}
 	return nil
 }

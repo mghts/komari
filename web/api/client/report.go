@@ -117,12 +117,16 @@ func UploadReport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
-	// 优先使用 body 中的 UUID，若为空则从中间件注入的上下文中获取
+	// An authenticated agent must never be able to submit a report for another
+	// node. Administrators may still specify the target UUID in the body.
 	uuid := report.UUID
-	if uuid == "" {
-		if v, ok := c.Get("client_uuid"); ok {
-			uuid, _ = v.(string)
+	if v, ok := c.Get("client_uuid"); ok {
+		authenticatedUUID, _ := v.(string)
+		if report.UUID != "" && report.UUID != authenticatedUUID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Report UUID does not match authenticated client"})
+			return
 		}
+		uuid = authenticatedUUID
 	}
 	if uuid == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "UUID is required"})

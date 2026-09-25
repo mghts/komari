@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"io"
 	"net/http"
@@ -22,15 +23,23 @@ import (
 
 func readMaybeCompressedBody(r *http.Request) ([]byte, error) {
 	defer r.Body.Close()
+	var body io.Reader = r.Body
 	if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
 		zr, err := gzip.NewReader(r.Body)
 		if err != nil {
 			return nil, err
 		}
 		defer zr.Close()
-		return io.ReadAll(zr)
+		body = zr
 	}
-	return io.ReadAll(r.Body)
+	data, err := io.ReadAll(io.LimitReader(body, api.MaxJSONRequestBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > api.MaxJSONRequestBody {
+		return nil, fmt.Errorf("request body exceeds %d bytes", api.MaxJSONRequestBody)
+	}
+	return data, nil
 }
 
 func bindV2Params[T any](raw any, target *T) error {

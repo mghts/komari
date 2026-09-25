@@ -12,11 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/config"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/public"
 )
@@ -27,6 +30,8 @@ const (
 	maxThemeExtractedSize = 512 << 20
 	maxThemeManifestSize  = 1 << 20
 )
+
+var themeInstallMu sync.Mutex
 
 // ListThemes 列出所有主题
 func ListThemes(c *gin.Context) {
@@ -55,7 +60,7 @@ func ListThemes(c *gin.Context) {
 
 	}
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
 			themeConfigPath := filepath.Join(dataDir, entry.Name(), "komari-theme.json")
 			if themeInfo, err := loadThemeConfig(themeConfigPath); err == nil {
 				themes = append(themes, themeInfo)
@@ -88,6 +93,8 @@ func DeleteTheme(c *gin.Context) {
 		return
 	}
 
+	themeInstallMu.Lock()
+	defer themeInstallMu.Unlock()
 	themeDir := filepath.Join("./data/theme", req.Short)
 
 	// 检查主题是否存在
@@ -139,6 +146,8 @@ func SetTheme(c *gin.Context) {
 
 // extractAndValidateTheme 解压并验证主题
 func extractAndValidateTheme(zipPath string) (models.Theme, error) {
+	themeInstallMu.Lock()
+	defer themeInstallMu.Unlock()
 	var themeInfo models.Theme
 
 	// 打开ZIP文件
@@ -188,31 +197,35 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		return themeInfo, err
 	}
 
-	// 创建主题目录
-	themeDir := filepath.Join("./data/theme", themeInfo.Short)
-
-	// 如果目录已存在，先删除
-	if _, err := os.Stat(themeDir); err == nil {
-		if err := os.RemoveAll(themeDir); err != nil {
-			return themeInfo, fmt.Errorf("删除原有主题失败: %v", err)
+	// Extract into a sibling directory first. A bad archive must not touch the
+	// currently installed theme.
+	themeRoot := "./data/theme"
+	if err := os.MkdirAll(themeRoot, 0755); err != nil {
+		return themeInfo, fmt.Errorf("创建主题目录失败: %w", err)
+	}
+	stageDir, err := os.MkdirTemp(themeRoot, ".komari-theme-stage-")
+	if err != nil {
+		return themeInfo, fmt.Errorf("创建主题暂存目录失败: %w", err)
+	}
+	defer func() {
+		if stageDir != "" {
+			_ = os.RemoveAll(stageDir)
 		}
-	}
+	}()
 
-	if err := os.MkdirAll(themeDir, 0755); err != nil {
-		return themeInfo, fmt.Errorf("创建主题目录失败: %v", err)
-	}
-
-	// 解压文件到主题目录
+	// 解压文件到暂存目录
 	for _, f := range r.File {
-		path := filepath.Join(themeDir, f.Name)
+		path := filepath.Join(stageDir, f.Name)
 
 		// 安全检查，防止路径遍历攻击
-		if !strings.HasPrefix(path, filepath.Clean(themeDir)+string(os.PathSeparator)) {
-			continue
+		if !strings.HasPrefix(path, filepath.Clean(stageDir)+string(os.PathSeparator)) {
+			return themeInfo, fmt.Errorf("主题文件路径不安全: %s", f.Name)
 		}
 
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(path, f.FileInfo().Mode())
+			if err := os.MkdirAll(path, f.FileInfo().Mode()); err != nil {
+				return themeInfo, fmt.Errorf("创建目录失败: %w", err)
+			}
 			continue
 		}
 
@@ -240,6 +253,31 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		if err != nil {
 			return themeInfo, fmt.Errorf("解压文件失败: %v", err)
 		}
+	}
+
+	themeDir := filepath.Join(themeRoot, themeInfo.Short)
+	if _, err := os.Stat(themeDir); err == nil {
+		previousDir := filepath.Join(themeRoot, "."+themeInfo.Short+"-previous-"+uuid.NewString())
+		if err := os.Rename(themeDir, previousDir); err != nil {
+			return themeInfo, fmt.Errorf("保留原有主题失败: %w", err)
+		}
+		if err := os.Rename(stageDir, themeDir); err != nil {
+			if rollbackErr := os.Rename(previousDir, themeDir); rollbackErr != nil {
+				return themeInfo, fmt.Errorf("安装主题失败: %v; 原主题留在 %s，回滚失败: %w", err, previousDir, rollbackErr)
+			}
+			return themeInfo, fmt.Errorf("安装主题失败: %w", err)
+		}
+		stageDir = ""
+		if err := os.RemoveAll(previousDir); err != nil {
+			logger.Warnf("theme", "failed to remove replaced theme at %s: %v", previousDir, err)
+		}
+	} else if os.IsNotExist(err) {
+		if err := os.Rename(stageDir, themeDir); err != nil {
+			return themeInfo, fmt.Errorf("安装主题失败: %w", err)
+		}
+		stageDir = ""
+	} else {
+		return themeInfo, fmt.Errorf("检查主题目录失败: %w", err)
 	}
 
 	return themeInfo, nil
@@ -328,42 +366,26 @@ func isPrivateIP(host string) bool {
 }
 
 func downloadThemeFromURL(rawURL string) ([]byte, error) {
-	// SSRF protection: block requests to private/internal IPs
-	parsedURL, err := url.Parse(rawURL)
+	// Reuse the market downloader's redirect validation, timeout and size cap.
+	return downloadMarketURL(rawURL, marketPackageMaxSize)
+}
+
+func writeThemeTempArchive(data []byte) (string, error) {
+	tempFile, err := os.CreateTemp("", "komari-theme-*.zip")
 	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %v", err)
+		return "", err
 	}
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return nil, fmt.Errorf("only http and https schemes are allowed")
+	path := tempFile.Name()
+	if _, err := tempFile.Write(data); err != nil {
+		tempFile.Close()
+		os.Remove(path)
+		return "", err
 	}
-	if isPrivateIP(parsedURL.Hostname()) {
-		return nil, fmt.Errorf("requests to private/internal addresses are not allowed")
+	if err := tempFile.Close(); err != nil {
+		os.Remove(path)
+		return "", err
 	}
-
-	// 发送HTTP GET请求
-	resp, err := http.Get(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("下载主题文件失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 检查响应状态码
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("下载主题文件失败，HTTP状态码: %d", resp.StatusCode)
-	}
-
-	// 读取响应内容
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("读取主题文件内容失败: %v", err)
-	}
-
-	// 检查文件大小
-	if len(data) == 0 {
-		return nil, errors.New("下载的主题文件为空")
-	}
-
-	return data, nil
+	return path, nil
 }
 
 // getGitHubReleaseDownloadURL 从GitHub API获取最新release的下载链接
@@ -612,9 +634,8 @@ func UpdateTheme(c *gin.Context) {
 	// 3. 用户提供的新URL下载
 	// 4. 用户提供的GitHub仓库信息，获取最新release下载
 
-	// 临时文件名
-	tempFile := filepath.Join(os.TempDir(), "downloaded_theme.zip")
-	if err := os.WriteFile(tempFile, themeData, 0644); err != nil {
+	tempFile, err := writeThemeTempArchive(themeData)
+	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
 		return
 	}
@@ -733,9 +754,8 @@ func ImportTheme(c *gin.Context) {
 		return
 	}
 
-	// 保存到临时文件
-	tempFile := filepath.Join(os.TempDir(), "import_theme.zip")
-	if err := os.WriteFile(tempFile, themeData, 0644); err != nil {
+	tempFile, err := writeThemeTempArchive(themeData)
+	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
 		return
 	}

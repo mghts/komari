@@ -31,12 +31,26 @@ func SaveClientInfo(update map[string]interface{}) error {
 		return fmt.Errorf("invalid client UUID")
 	}
 
-	// 确保更新的字段不为空
-	if len(update) == 0 {
+	// An agent may only update machine-reported fields. Never pass its raw JSON
+	// map to GORM: it also contains administrator-owned columns such as token.
+	allowed := map[string]bool{
+		"cpu_name": true, "cpu_cores": true, "cpu_physical_cores": true,
+		"arch": true, "os": true, "kernel_version": true,
+		"ipv4": true, "ipv6": true, "mem_total": true,
+		"swap_total": true, "disk_total": true, "gpu_name": true,
+		"virtualization": true, "version": true, "region": true,
+	}
+	filtered := make(map[string]interface{}, len(update))
+	for key, value := range update {
+		if allowed[key] {
+			filtered[key] = value
+		}
+	}
+	if len(filtered) == 0 {
 		return fmt.Errorf("no fields to update")
 	}
 
-	update["updated_at"] = time.Now().UTC()
+	filtered["updated_at"] = time.Now().UTC()
 
 	toFloat64 := func(value interface{}) (float64, bool) {
 		switch typed := value.(type) {
@@ -110,11 +124,11 @@ func SaveClientInfo(update map[string]interface{}) error {
 		return nil
 	}
 
-	if err := verify(update); err != nil {
+	if err := verify(filtered); err != nil {
 		return err
 	}
 
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(update).Error
+	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(filtered).Error
 	if err != nil {
 		return err
 	}
